@@ -1,0 +1,8 @@
+[package]
+name = "litepcie"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pci-driver = "0.1.4"
+serde = { version = "1.0.195", features = ["derive"] }
