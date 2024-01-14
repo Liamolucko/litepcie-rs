@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt::{self, Display, Formatter};
 
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +73,15 @@ pub enum CsrKind {
     /// The CSR can be both read and written.
     #[serde(rename = "rw")]
     ReadWrite,
+}
+
+impl Display for CsrKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            CsrKind::ReadOnly => f.pad("read-only"),
+            CsrKind::ReadWrite => f.pad("read-write"),
+        }
+    }
 }
 
 /// The value of a constant about an SoC, which can either be a string or an
