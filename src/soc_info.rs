@@ -113,3 +113,18 @@ pub struct MemoryRegion<'a> {
     #[serde(rename = "type")]
     pub kind: Cow<'a, str>,
 }
+
+impl SocInfo<'_> {
+    /// Helper function to retrieve the base address of the SoC's CSR memory
+    /// region.
+    ///
+    /// Needed since BAR 0 just contains the SoC's CSRs, but the addresses of
+    /// the CSRs are given as addresses in the SoC's overall memory space and so
+    /// need to have the CSR base address subtracted from them.
+    pub fn csr_base(&self) -> crate::csr::Result<u64> {
+        match self.memories.get("csr") {
+            Some(region) => Ok(region.base),
+            None => Err(crate::csr::Error::NoCsrRegion),
+        }
+    }
+}

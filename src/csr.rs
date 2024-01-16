@@ -4,6 +4,28 @@ use pci_driver::regions::{AsPciSubregion, BackedByPciSubregion, PciRegion};
 
 use crate::{CsrKind, SocInfo};
 
+#[derive(thiserror::Error, Debug, Clone)]
+pub enum Error {
+    #[error("CSR memory region not found in SocInfo")]
+    NoCsrRegion,
+    #[error("required CSR `{csr}` not found in SocInfo")]
+    MissingCsr { csr: String },
+    #[error("expected CSR `{csr}` to be of size {expected}, found {found}")]
+    CsrWrongSize {
+        csr: String,
+        expected: u64,
+        found: u64,
+    },
+    #[error("expected CSR `{csr}` to be {expected}, but it was {found}")]
+    CsrWrongKind {
+        csr: String,
+        expected: CsrKind,
+        found: CsrKind,
+    },
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
 /// A handle to a read-only CSR in the SoC.
 pub struct CsrRo<'a, const N: usize = 1> {
     region: &'a dyn PciRegion,
@@ -77,7 +99,7 @@ pub trait CsrGroup<'a> {
     type Addrs;
     /// Figures out the addresses of all the CSRs in this group from an
     /// `soc_info` and the name of the module that contains them.
-    fn addrs(soc_info: &SocInfo, module: &str) -> crate::Result<Self::Addrs>;
+    fn addrs(soc_info: &SocInfo, module: &str) -> Result<Self::Addrs>;
     /// Creates a handle to this group of CSRs from the [`PciSubregion`] that
     /// contains them.
     ///
@@ -91,33 +113,33 @@ pub trait CsrGroup<'a> {
 impl<'a, const N: usize> CsrGroup<'a> for CsrRo<'a, N> {
     type Addrs = u64;
 
-    fn addrs(soc_info: &SocInfo, module: &str) -> crate::Result<Self::Addrs> {
+    fn addrs(soc_info: &SocInfo, module: &str) -> Result<Self::Addrs> {
         // We're down to the individual CSR now, which means there's nothing left to add
         // on to `module`: it's the final name of the CSR.
         let info = soc_info
             .csr_registers
             .get(module)
-            .ok_or_else(|| crate::Error::MissingCsr {
+            .ok_or_else(|| Error::MissingCsr {
                 csr: module.to_owned(),
             })?;
 
         let expected_size = N.try_into().unwrap();
         if info.size != expected_size {
-            return Err(crate::Error::CsrWrongSize {
+            return Err(Error::CsrWrongSize {
                 csr: module.to_owned(),
                 expected: expected_size,
                 found: info.size,
             });
         }
         if info.kind != CsrKind::ReadOnly {
-            return Err(crate::Error::CsrWrongKind {
+            return Err(Error::CsrWrongKind {
                 csr: module.to_owned(),
                 expected: CsrKind::ReadOnly,
                 found: info.kind,
             });
         }
 
-        Ok(info.addr)
+        Ok(info.addr - soc_info.csr_base()?)
     }
 
     fn backed_by(as_subregion: impl AsPciSubregion<'a>, addrs: Self::Addrs) -> Self {
@@ -130,33 +152,33 @@ impl<'a, const N: usize> CsrGroup<'a> for CsrRo<'a, N> {
 impl<'a, const N: usize> CsrGroup<'a> for CsrRw<'a, N> {
     type Addrs = u64;
 
-    fn addrs(soc_info: &SocInfo, module: &str) -> crate::Result<Self::Addrs> {
+    fn addrs(soc_info: &SocInfo, module: &str) -> Result<Self::Addrs> {
         // We're down to the individual CSR now, which means there's nothing left to add
         // on to `module`: it's the final name of the CSR.
         let info = soc_info
             .csr_registers
             .get(module)
-            .ok_or_else(|| crate::Error::MissingCsr {
+            .ok_or_else(|| Error::MissingCsr {
                 csr: module.to_owned(),
             })?;
 
         let expected_size = N.try_into().unwrap();
         if info.size != expected_size {
-            return Err(crate::Error::CsrWrongSize {
+            return Err(Error::CsrWrongSize {
                 csr: module.to_owned(),
                 expected: expected_size,
                 found: info.size,
             });
         }
         if info.kind != CsrKind::ReadWrite {
-            return Err(crate::Error::CsrWrongKind {
+            return Err(Error::CsrWrongKind {
                 csr: module.to_owned(),
                 expected: CsrKind::ReadWrite,
                 found: info.kind,
             });
         }
 
-        Ok(info.addr)
+        Ok(info.addr - soc_info.csr_base()?)
     }
 
     fn backed_by(as_subregion: impl AsPciSubregion<'a>, addrs: Self::Addrs) -> Self {
@@ -169,10 +191,10 @@ impl<'a, const N: usize> CsrGroup<'a> for CsrRw<'a, N> {
 impl<'a, T: CsrGroup<'a>> CsrGroup<'a> for Option<T> {
     type Addrs = Option<T::Addrs>;
 
-    fn addrs(soc_info: &SocInfo, module: &str) -> crate::Result<Option<T::Addrs>> {
+    fn addrs(soc_info: &SocInfo, module: &str) -> Result<Option<T::Addrs>> {
         match T::addrs(soc_info, module) {
             Ok(addrs) => Ok(Some(addrs)),
-            Err(crate::Error::MissingCsr { .. }) => Ok(None),
+            Err(Error::MissingCsr { .. }) => Ok(None),
             Err(other) => Err(other),
         }
     }
@@ -216,7 +238,7 @@ macro_rules! csr_struct {
 
             impl<$lifetime> $crate::csr::CsrGroup<$lifetime> for $name<$lifetime> {
                 type Addrs = $name<$lifetime, ()>;
-                fn addrs(soc_info: &$crate::SocInfo, module: &$crate::std::primitive::str) -> $crate::Result<Self::Addrs> {
+                fn addrs(soc_info: &$crate::SocInfo, module: &$crate::std::primitive::str) -> $crate::csr::Result<Self::Addrs> {
                     Ok($name {
                         region: (),
                         $(
