@@ -3,12 +3,20 @@ name = "litepcie"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+async = ["dep:async-io"]
+
 [dependencies]
+async-io = { version = "2.3.0", optional = true }
+event-listener = "4.0.3"
 pci-driver = "0.1.4"
+rangemap = "1.4.0"
+rustix = { version = "0.38.30", features = ["event"] }
 serde = { version = "1.0.195", features = ["derive"] }
 thiserror = "1.0.56"
 
 [dev-dependencies]
 anyhow = "1.0.79"
 clap = { version = "4.4.17", features = ["derive"] }
+polling = "3.3.2"
 serde_json = "1.0.111"
