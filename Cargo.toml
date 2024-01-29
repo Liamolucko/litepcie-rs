@@ -10,6 +10,7 @@ async = ["dep:async-io"]
 async-io = { version = "2.3.0", optional = true }
 event-listener = "4.0.3"
 pci-driver = "0.1.4"
+rand = "0.8.5"
 rangemap = "1.4.0"
 rustix = { version = "0.38.30", features = ["event"] }
 serde = { version = "1.0.195", features = ["derive"] }

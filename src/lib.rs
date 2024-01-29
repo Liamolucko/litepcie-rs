@@ -1,12 +1,14 @@
 use std::alloc::{handle_alloc_error, Layout};
 use std::borrow::Cow;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ops::Range;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::pin::pin;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::{io, slice};
+use std::time::Duration;
+use std::{io, slice, thread};
 
 use csr::{CsrGroup, CsrRo, CsrRw};
 use event_listener::{Event, EventListener};
@@ -34,6 +36,10 @@ pub enum Error {
     Io(#[from] io::Error),
     #[error("PCI device did not have a BAR 0, which is where CSRs are accessed")]
     MissingCsrRegion,
+    #[error("no module named {module} in SocInfo")]
+    MissingModule { module: String },
+    // TODO: replace these with more general errors about constants then add `int_constant`,
+    // `string_constant`, `null_constant` methods to `LitePcie`.
     #[error("SoC does not have an interrupt named {name}")]
     NoSuchInterrupt { name: String },
     #[error("interrupt {name}'s index was of type {found}, expected int")]
@@ -66,6 +72,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// interrupts.
 ///
 /// [`CsrGroup::backed_by`]: csr::CsrGroup::backed_by
+#[derive(Debug)]
 pub struct LitePcie<'a> {
     /// The `SocInfo` of the SoC this LitePCIe instance is running on, as passed
     /// to [`LitePcie::new`].
@@ -137,7 +144,7 @@ impl<'a> LitePcie<'a> {
                 .collect::<Vec<_>>(),
         )?;
 
-        Ok(Self {
+        let this = Self {
             soc_info,
             name,
             device,
@@ -145,7 +152,13 @@ impl<'a> LitePcie<'a> {
             free_iovas,
             irq_enable_lock: Mutex::new(()),
             irq_state,
-        })
+        };
+
+        let reset: CsrRw<'_> = this.get_soc_csr_group("ctrl_reset")?;
+        reset.write([1])?;
+        thread::sleep(Duration::from_millis(10));
+
+        Ok(this)
     }
 
     /// A helper function to get the CSRs associated with a submodule of this
@@ -232,9 +245,8 @@ impl<'a> LitePcie<'a> {
 
         impl FreeOnDrop {
             fn into_inner(self) -> NonNull<u8> {
-                // Use destructuring to make sure we don't accidentally run `drop`.
-                let FreeOnDrop(ptr, _) = self;
-                ptr
+                let this = ManuallyDrop::new(self);
+                this.0
             }
         }
 
@@ -335,6 +347,7 @@ impl<'a> LitePcie<'a> {
 
 /// A chunk of allocated IOVA space, along with a heap-allocated buffer that
 /// it's mapped to.
+#[derive(Debug)]
 pub struct IovaRange<'a> {
     /// A handle to the IOMMU that this range was mapped with so that we can
     /// unmap it on drop.
@@ -346,10 +359,54 @@ pub struct IovaRange<'a> {
 }
 
 impl<'a> IovaRange<'a> {
+    /// Returns the range of IOVAs this represents.
+    pub fn iova_range(&self) -> Range<u64> {
+        self.iova_range.clone()
+    }
+
+    /// Returns the length of this chunk of IOVA space.
     pub fn len(&self) -> usize {
         (self.iova_range.end - self.iova_range.start)
             .try_into()
             .unwrap()
+    }
+
+    /// Returns the given slice of this IOVA range.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `range.start > range.end` or `range.end > self.len()`.
+    ///
+    /// # Safety
+    ///
+    /// The given range must not be accessed by the SoC while the returned
+    /// reference still exists.
+    pub unsafe fn slice(&self, range: Range<usize>) -> &[MaybeUninit<u8>] {
+        if range.start > range.end {
+            panic!("invalid range");
+        } else if range.end > self.len() {
+            panic!("range out of bounds");
+        }
+        slice::from_raw_parts(self.buf.as_ptr().add(range.start) as *const _, range.len())
+    }
+
+    /// Returns the given mutable slice of this IOVA range.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `range.start > range.end` or `range.end > self.len()`.
+    ///
+    /// # Safety
+    ///
+    /// The given range must not be accessed by the SoC while the returned
+    /// reference still exists.
+    pub unsafe fn slice_mut(&mut self, range: Range<usize>) -> &mut [MaybeUninit<u8>] {
+        if range.start > range.end {
+            panic!("invalid range");
+        } else if range.end > self.len() {
+            panic!("range out of bounds");
+        }
+        slice::from_raw_parts_mut(self.buf.as_ptr().add(range.start) as *mut _, range.len())
     }
 }
 
@@ -380,7 +437,11 @@ impl<'a> Drop for IovaRange<'a> {
     }
 }
 
+unsafe impl Send for IovaRange<'_> {}
+unsafe impl Sync for IovaRange<'_> {}
+
 /// The state associated with handling interrupts from the SoC.
+#[derive(Debug)]
 enum IrqState {
     /// The SoC is using single-vector MSI mode.
     SingleVector {
@@ -446,6 +507,7 @@ csr_struct! {
 }
 
 /// A handle to one of a LitePCIe instance's MSI (or MSI-X) interrupts.
+#[derive(Debug)]
 pub struct Irq<'a> {
     /// The index of the interrupt.
     index: usize,
@@ -467,6 +529,7 @@ pub struct Irq<'a> {
 
 /// All the information / CSRs needed to figure out whether an incoming MSI is a
 /// particular interrupt.
+#[derive(Debug)]
 pub struct SingleVectorState<'a> {
     /// The CSR indicating which interrupts have fired since they were last
     /// cleared.
@@ -510,12 +573,12 @@ impl<'a> Irq<'a> {
         let mut buf = [0; 8];
         if let Some(state) = &self.single_vector_state {
             let mut listener = pin!(EventListener::new());
-            // Start listening for events now so that we don't miss any between reading the
-            // CSR and actually waiting for them.
-            listener.as_mut().listen(&state.read_event);
             loop {
+                // Start listening for events now so that we don't miss any between reading the
+                // CSR and actually waiting for them.
+                listener.as_mut().listen(&state.read_event);
                 let [vector] = state.vector.read()?;
-                if vector & (1 << self.index) == 0 {
+                if vector & (1 << self.index) != 0 {
                     // We've received the interrupt, so now we clear it.
                     state.clear.write([1 << self.index])?;
                     return Ok(());
@@ -564,7 +627,7 @@ impl<'a> Irq<'a> {
             listener.as_mut().listen(&state.read_event);
             loop {
                 let [vector] = state.vector.read()?;
-                if vector & (1 << self.index) == 0 {
+                if vector & (1 << self.index) != 0 {
                     // We've received the interrupt, so now we clear it.
                     state.clear.write([1 << self.index])?;
                     return Ok(());

@@ -1,3 +1,4 @@
+use std::fmt::{self, Debug, Formatter};
 use std::io;
 
 use pci_driver::regions::{AsPciSubregion, BackedByPciSubregion, PciRegion};
@@ -54,6 +55,15 @@ impl<'a, const N: usize> BackedByPciSubregion<'a> for CsrRo<'a, N> {
     }
 }
 
+impl<const N: usize> Debug for CsrRo<'_, N> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.read() {
+            Ok(x) => x.fmt(f),
+            Err(_) => f.pad("(error)"),
+        }
+    }
+}
+
 /// A handle to a read-write CSR in the SoC.
 pub struct CsrRw<'a, const N: usize = 1> {
     region: &'a dyn PciRegion,
@@ -86,6 +96,15 @@ impl<'a, const N: usize> BackedByPciSubregion<'a> for CsrRw<'a, N> {
         Self {
             region: subregion.underlying_region(),
             offset: subregion.offset_in_underlying_region(),
+        }
+    }
+}
+
+impl<const N: usize> Debug for CsrRw<'_, N> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.read() {
+            Ok(x) => x.fmt(f),
+            Err(_) => f.pad("(error)"),
         }
     }
 }
@@ -264,6 +283,16 @@ macro_rules! csr_struct {
                         <$field_ty as $crate::csr::CsrGroup<$lifetime>>::backed_by(&self.region, self.$field_name)
                     }
                 )*
+            }
+
+            impl<$lifetime> $crate::std::fmt::Debug for $name<$lifetime> {
+                fn fmt(&self, f: &mut $crate::std::fmt::Formatter<'_>) -> $crate::std::fmt::Result {
+                    f.debug_struct(stringify!($name))
+                    $(
+                        .field(stringify!($field_name), &self.$field_name())
+                    )*
+                    .finish()
+                }
             }
         )*
     };
